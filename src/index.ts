@@ -17,17 +17,75 @@ export type Options = CloneOptions &
         removeContainer?: boolean;
     };
 
+export type Setup = {
+    ownerDocument: Document, 
+    instanceName: string, 
+    container: HTMLIFrameElement, 
+    options: Options, 
+    clonedElement: HTMLElement | undefined
+}
+
 const parseColor = (value: string): Color => color.parse(Parser.create(value).parseComponentValue());
 
-const html2canvas = (element: HTMLElement, options: Partial<Options> = {}): Promise<HTMLCanvasElement> => {
-    return renderElement(element, options);
+const html2canvas = async (element: HTMLElement, options: Partial<Options> = {}): Promise<HTMLCanvasElement> => {
+    const setup = await getSetup(element, options);
+    return renderElement(element, options, setup).then(count => {
+        Logger.destroy(setup.instanceName);
+        CacheStorage.destroy(setup.instanceName);
+        return count;
+    });
 };
 
 export default html2canvas;
+export const html2canvases = async (elements: HTMLElement[], options: Partial<Options> = {}): Promise<Number> => {
+    let chain: Promise<number> = Promise.resolve(1);
+    const setup = await getSetup(elements[0], options);
+    if(!setup.options.onrendered) {
+        return Promise.reject('options.onrendered must be defined');
+    }
+    elements.forEach((element, idx) => {
+        chain = chain.then(canvasId => {
+            let nextSetup = {...setup};
+                nextSetup.options = {...setup.options, removeContainer: idx === elements.length - 1}; // remove container only after all elements are processed}
+            if(idx>0 && setup.container.contentWindow && setup.container.contentWindow.document) {
+                const ownerDocument = element.ownerDocument;
+                if (!ownerDocument) {
+                    throw new Error(`Element is not attached to a Document`);
+                }
+                const {width, height, left, top} = isBodyElement(element) || isHTMLElement(element) ? parseDocumentSize(ownerDocument) : parseBounds(element);
+                
+                nextSetup.clonedElement = getClonedElement(setup.container.contentWindow.document, element);
+                Object.assign(nextSetup.options, {
+                    x: left,
+                    y: top,
+                    width: Math.ceil(width),
+                    height: Math.ceil(height),
+                });
+            }
+            return renderElement(element, options, nextSetup).then(canvas => {
+                if(setup.options.onrendered) {
+                    if(setup.options.onrendered(canvas)) {
+                        return canvasId+1;
+                    } else {
+                        return Promise.reject(new Error(`Rendering was cancelled on ${canvasId} element`));
+                    }
+                } else {
+                    return Promise.reject(new Error(`options.onrendered must be defined. Last canvas id was ${canvasId}`));
+                }
+
+            })
+        });
+    });
+    return chain.then(count => {
+        Logger.destroy(setup.instanceName);
+        CacheStorage.destroy(setup.instanceName);
+        return count;
+    });
+};
 
 CacheStorage.setContext(window);
 
-const renderElement = async (element: HTMLElement, opts: Partial<Options>): Promise<HTMLCanvasElement> => {
+const getSetup = async (element: HTMLElement, opts: Partial<Options>): Promise<Setup> => {
     const ownerDocument = element.ownerDocument;
 
     if (!ownerDocument) {
@@ -86,11 +144,16 @@ const renderElement = async (element: HTMLElement, opts: Partial<Options>): Prom
         copyStyles: options.foreignObjectRendering
     });
     const clonedElement = documentCloner.clonedReferenceElement;
+
+    const container = await documentCloner.toIFrame(ownerDocument, windowBounds);
+    return {ownerDocument, instanceName, container, options, clonedElement};
+}
+
+const renderElement = async (element: HTMLElement, opts: Partial<Options>, setup: Setup): Promise<HTMLCanvasElement> => {
+    const {ownerDocument, instanceName, container, options, clonedElement} = setup;
     if (!clonedElement) {
         return Promise.reject(`Unable to find element in cloned iframe`);
     }
-
-    const container = await documentCloner.toIFrame(ownerDocument, windowBounds);
 
     // http://www.w3.org/TR/css3-background/#special-backgrounds
     const documentBackgroundColor = ownerDocument.documentElement
@@ -158,8 +221,7 @@ const renderElement = async (element: HTMLElement, opts: Partial<Options>): Prom
     }
 
     Logger.getInstance(instanceName).debug(`Finished rendering`);
-    Logger.destroy(instanceName);
-    CacheStorage.destroy(instanceName);
+
     return canvas;
 };
 
@@ -170,3 +232,41 @@ const cleanContainer = (container: HTMLIFrameElement): boolean => {
     }
     return false;
 };
+
+const getClonedElement = (clonedDocument: Document, element: Node) : HTMLElement => {
+    if (element && element.nodeType == 1 && element.parentNode) {
+        let path = '';
+        let parent = (element.parentNode as Node & ParentNode | null) ;
+        while (parent && parent.nodeType == 1) {
+            const parentTagName = parent.nodeName.toLowerCase();
+            const parentClasses = (parent as HTMLElement).className;
+            const parentId = (parent as HTMLElement).id;
+            
+            if (parentTagName === 'html' || parentTagName === 'body') {
+                path = parentTagName + ' ' + path;
+				break;
+            } else {
+                let selector;
+                if (parentId) {
+                    selector = '#' + parentId;
+                } else if (parentClasses.length > 0) {
+                    selector = parentTagName + '.' + parentClasses.replace(/ /g, '.');
+                } else {
+                    selector = parentTagName;
+                }
+                path = ' ' + selector + path;
+                parent = parent.parentNode;
+			}
+        }
+
+        const childIndex = Array.prototype.indexOf.call(element.parentNode.children, element);
+        const clonedElementParent = clonedDocument.querySelector(path);
+        if(clonedElementParent) {
+            return (clonedElementParent.children[childIndex] as HTMLElement);
+        } else {
+            throw new Error('unable to find element in a cloned document');
+        }
+    } else {
+        throw new Error('provided argument is not HTMLElement or has no parent');
+    }
+}
