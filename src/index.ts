@@ -29,10 +29,10 @@ const parseColor = (value: string): Color => color.parse(Parser.create(value).pa
 
 const html2canvas = async (element: HTMLElement, options: Partial<Options> = {}): Promise<HTMLCanvasElement> => {
     const setup = await getSetup(element, options);
-    return renderElement(element, options, setup).then(count => {
+    return renderElement(element, options, setup).then(canvas => {
         Logger.destroy(setup.instanceName);
         CacheStorage.destroy(setup.instanceName);
-        return count;
+        return canvas;
     });
 };
 
